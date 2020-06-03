@@ -2,6 +2,8 @@ import numpy as np
 import cv2
 import glob
 import matplotlib.pyplot as plt
+import argparse
+import os
 
 import torch
 import torch.nn as nn
@@ -13,6 +15,10 @@ import flowchart
 import focalLoss as fl
 from model.unet import UNet
 from model.fcn import *
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--model', type=str, default='UNet', choices=['UNet', 'FCN', 'DeepLab'])
+args = parser.parse_args()
 
 class_names = ['process', 'decision', 'terminator', 'data', 'connection', 'arrow', 'text']
 fill_flag = [True, True, True, True, True, False, False]
@@ -102,20 +108,28 @@ def computeIoU(pred, gt, thresh=0.5):
 if __name__ == '__main__':
 #	imgList = makeImages()
 
-	loader_train = torch.utils.data.DataLoader(FlowchartDataset(set='train', size=(256, 256)), batch_size=2, shuffle=True)
-	loader_test = torch.utils.data.DataLoader(FlowchartDataset(set='test', size=(256, 256)), batch_size=2, shuffle=False)
+	size=(256,256)
+
+	loader_train = torch.utils.data.DataLoader(FlowchartDataset(set='train', size=size), batch_size=2, shuffle=True)
+	loader_test = torch.utils.data.DataLoader(FlowchartDataset(set='test', size=size), batch_size=2, shuffle=False)
 
 	device = ('cuda' if torch.cuda.is_available() else 'cpu')
 
-	model = UNet(n_channels=3, n_classes=len(class_names))
-#	model = FCN(n_classes=len(class_names))
-#	model = DeepLabV3(n_classes=len(class_names))
+	if args.model == 'FCN':
+		model = FCN(n_classes=len(class_names))
+	elif args.model == 'DeepLab':
+		model = DeepLabV3(n_classes=len(class_names))
+	elif args.model == 'UNet':
+		model = UNet(n_channels=3, n_classes=len(class_names))
+
 	model = model.to(device)
-	summary(model, (3, 256, 256))
+	summary(model, (3, size[1], size[0]))
 
 	optimizer = optim.Adam(model.parameters())
 #	criteria = nn.BCEWithLogitsLoss()
 	criteria = fl.FocalLossBCE(gamma=2.0)
+
+	os.makedirs('result/' + args.model, exist_ok=True)
 
 	for epoch in range(10):
 		for i, (img, gt) in enumerate(loader_train):
@@ -141,14 +155,18 @@ if __name__ == '__main__':
 
 				for j in range(result.shape[0]):
 					iou.append(computeIoU(result[j], answer[j]))
-					cv2.imwrite('result/epoch%03d_%d_%d.png' % (epoch, i, j), 
+					cv2.imwrite('result/%s/epoch%03d_%d_%d.png' % (args.model, epoch, i, j), 
 						np.hstack((input[j] * 255, visualizeMap(result[j]), visualizeMap(answer[j]))))
 
+			write = open('result/%s/epoch%d.txt' % (args.model, epoch))
 			iou = np.array(iou)
 			print('IoU')
+			write.write('IoU\n')
 			mean = np.mean(iou, axis=0)
 			for i, c in enumerate(class_names):
 				print('\t' + c + ': %f' % mean[i])
+				write.write('\t' + c + ': %f\n' % mean[i])
 			print('mIoU: %f' % (np.mean(iou)))
+			write.write('mIoU: %f\n' % (np.mean(iou)))
 
 		model.train()
