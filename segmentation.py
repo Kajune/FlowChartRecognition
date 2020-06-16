@@ -4,25 +4,38 @@ import glob
 import matplotlib.pyplot as plt
 import argparse
 import os
+import random
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+from torchvision import transforms
 from torchsummary import summary
 
 import flowchart
 import focalLoss as fl
-from model.unet import UNet
+from model.unet import UNet, UNetPP
 from model.fcn import *
+import osm
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', type=str, default='UNet', choices=['UNet', 'FCN', 'DeepLab'])
+parser.add_argument('--model', type=str, default='UNet', choices=['FCN', 'DeepLab', 'UNet', 'UNetPP'])
 args = parser.parse_args()
 
 class_names = ['process', 'decision', 'terminator', 'data', 'connection', 'arrow', 'text']
 fill_flag = [True, True, True, True, True, False, False]
 color = [(0,0,255), (0,255,0), (255,255,0), (0,255,255), (255,0,255), (255,0,0), (255,255,255)]
+
+np.random.seed(114514)
+
+osm_cands = []
+for i in range(100):
+	lat = np.random.uniform(35, 35.5)
+	lon = np.random.uniform(130, 140)
+	d = np.random.uniform(0.05, 0.1)
+	zoom = np.random.choice([13])
+	osm_cands.append((lat, lon, d, zoom))
 
 def imshow(img, title='', scale=0.25):
 	cv2.imshow(title, cv2.resize(img, None, fx=scale, fy=scale))
@@ -32,6 +45,19 @@ def visualizeMap(map):
 	for i in range(map.shape[2]):
 		img[map[:,:,i] > 0] = color[i]
 	return img
+
+def encodeMap(map):
+	img = np.zeros((map.shape[0], map.shape[1]), dtype=np.uint8)
+	for i in range(map.shape[2]):
+		img[map[:,:,i] > 0] += 2 ** (i + 1)
+	return img
+
+def decodeMap(enc_map):
+	map = np.zeros((enc_map.shape[0], enc_map.shape[1], len(class_names)), dtype=np.float32)
+	for i in range(map.shape[2] - 1, -1, -1):
+		map[:,:,i][enc_map >= 2 ** (i + 1)] = 1
+		enc_map[enc_map >= 2 ** (i + 1)] -= 2 ** (i + 1)
+	return map
 
 def makeImages(linewidth=5):
 	dataset = flowchart.load()
@@ -70,35 +96,70 @@ def makeImages(linewidth=5):
 				cv2.fillConvexPoly(tmp, points=contours, color=1)
 				gt[:,:,cls_id] = tmp
 
-		cv2.imwrite('dataset/%05d.png' % i, img * 255)
-		np.save('dataset/%05d.npy' % i, gt)
+		cv2.imwrite('dataset/img/%05d.png' % i, img * 255)
+		cv2.imwrite('dataset/gt/%05d.png' % i, encodeMap(gt))
 		imgList.append((img, gt))
 	print()
 
 	return imgList
 
 class FlowchartDataset(torch.utils.data.Dataset):
-	def __init__(self, set, size):
-		self.imgList = glob.glob('dataset/' + set + '/*.png')
+	def __init__(self, set, size, aug=False, osm_alpha=0.0):
+		self.imgList = glob.glob('dataset/' + set + '/img/*.png')
 		self.size = size
+		self.osm_alpha = osm_alpha
+		self.aug = aug
 
 	def __len__(self):
 		return len(self.imgList)
 
 	def __getitem__(self, idx):
 		img = cv2.imread(self.imgList[idx], 1).astype(np.float32) / 255
-		gt = np.load(self.imgList[idx].replace('.png', '.npy'))
+		gt = decodeMap(cv2.imread(self.imgList[idx].replace('img', 'gt'), 0))
 
 		scale = min(self.size[0] / img.shape[1], self.size[1] / img.shape[0])
 		img = cv2.resize(img, None, fx=scale, fy=scale)
 		img_ = np.ones((self.size[1], self.size[0], 3), dtype=np.float32)
 		img_[:img.shape[0], :img.shape[1]] = img
 
+		if self.osm_alpha > 0:
+			lat, lon, d, zoom = random.choice(osm_cands)
+
+			if os.path.exists('dataset/osm_cache/%f_%f_%f_%d.png' % (lat, lon, d, zoom)):
+				mapImg = cv2.imread('dataset/osm_cache/%f_%f_%f_%d.png' % (lat, lon, d, zoom))
+			else:
+				mapImg = osm.getImageCluster(lat, lon, lat + d, lon + d, zoom)
+				cv2.imwrite('dataset/osm_cache/%f_%f_%f_%d.png' % (lat, lon, d, zoom), mapImg)
+			mapImg = cv2.resize(mapImg, (self.size[1], self.size[0])).astype(np.float32) / 255
+			mapImg *= self.osm_alpha
+			mapImg += 1.0 - np.max(mapImg)
+			img_ = mapImg * img_
+
 		gt = cv2.resize(gt, None, fx=scale, fy=scale)
 		gt_ = np.zeros((self.size[1], self.size[0], gt.shape[2]), dtype=np.float32)
 		gt_[:gt.shape[0], :gt.shape[1]] = gt
 
-		return 1.0 - img_.transpose((2,0,1)), gt_.transpose((2,0,1))
+		if self.aug:
+			gt_ = encodeMap(gt_)
+			img_ = img_ * np.random.uniform(0.8, 1.2) + np.random.uniform(-0.1, 0.1)
+
+			if np.random.rand() >= 0.5:
+				img_ = np.flipud(img_).copy()
+				gt_ = np.flipud(gt_).copy()
+
+			if np.random.rand() >= 0.5:
+				img_ = np.fliplr(img_).copy()
+				gt_ = np.fliplr(gt_).copy()
+
+			angle = np.random.uniform(-30, 30)
+			scale = np.random.uniform(0.8, 1.0)
+			trans = cv2.getRotationMatrix2D((img_.shape[1]/2, img_.shape[0]/2), angle, scale)
+			img_ = cv2.warpAffine(img_, trans, (img_.shape[1],img_.shape[0]))
+			gt_ = cv2.warpAffine(gt_, trans, (gt_.shape[1],gt_.shape[0]), flags=cv2.INTER_NEAREST)
+
+			gt_ = decodeMap(gt_)
+
+		return img_.transpose((2,0,1)), gt_.transpose((2,0,1))
 
 def computeIoU(pred, gt, thresh=0.5):
 	intersection = np.bitwise_and(pred > thresh, gt > thresh).astype(np.float32)
@@ -108,10 +169,11 @@ def computeIoU(pred, gt, thresh=0.5):
 if __name__ == '__main__':
 #	imgList = makeImages()
 
-	size=(256,256)
+	size=(384,384)
 
-	loader_train = torch.utils.data.DataLoader(FlowchartDataset(set='train', size=size), batch_size=2, shuffle=True)
-	loader_test = torch.utils.data.DataLoader(FlowchartDataset(set='test', size=size), batch_size=2, shuffle=False)
+	loader_train = torch.utils.data.DataLoader(FlowchartDataset(set='train', size=size, osm_alpha=0.5, aug=False), 
+		batch_size=2, shuffle=True)
+	loader_test = torch.utils.data.DataLoader(FlowchartDataset(set='test', size=size, osm_alpha=0.5), batch_size=2, shuffle=False)
 
 	device = ('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -121,9 +183,11 @@ if __name__ == '__main__':
 		model = DeepLabV3(n_classes=len(class_names))
 	elif args.model == 'UNet':
 		model = UNet(n_channels=3, n_classes=len(class_names))
+	elif args.model == 'UNetPP':
+		model = UNetPP(n_channels=3, n_classes=len(class_names))
 
 	model = model.to(device)
-	summary(model, (3, size[1], size[0]))
+#	summary(model, (3, size[1], size[0]))
 
 	optimizer = optim.Adam(model.parameters())
 #	criteria = nn.BCEWithLogitsLoss()
@@ -151,14 +215,14 @@ if __name__ == '__main__':
 				answer = gt.numpy().transpose((0,2,3,1))
 
 				img = img.to(device)
-				result = model(img).cpu().numpy().transpose((0,2,3,1))
+				result = model.predict(img).cpu().numpy().transpose((0,2,3,1))
 
 				for j in range(result.shape[0]):
 					iou.append(computeIoU(result[j], answer[j]))
 					cv2.imwrite('result/%s/epoch%03d_%d_%d.png' % (args.model, epoch, i, j), 
 						np.hstack((input[j] * 255, visualizeMap(result[j]), visualizeMap(answer[j]))))
 
-			write = open('result/%s/epoch%d.txt' % (args.model, epoch))
+			write = open('result/%s/epoch%d.txt' % (args.model, epoch), 'w')
 			iou = np.array(iou)
 			print('IoU')
 			write.write('IoU\n')
@@ -168,5 +232,6 @@ if __name__ == '__main__':
 				write.write('\t' + c + ': %f\n' % mean[i])
 			print('mIoU: %f' % (np.mean(iou)))
 			write.write('mIoU: %f\n' % (np.mean(iou)))
+			write.close()
 
 		model.train()
