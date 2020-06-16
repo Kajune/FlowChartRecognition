@@ -29,13 +29,7 @@ color = [(0,0,255), (0,255,0), (255,255,0), (0,255,255), (255,0,255), (255,0,0),
 
 np.random.seed(114514)
 
-osm_cands = []
-for i in range(100):
-	lat = np.random.uniform(35, 35.5)
-	lon = np.random.uniform(130, 140)
-	d = np.random.uniform(0.05, 0.1)
-	zoom = np.random.choice([13])
-	osm_cands.append((lat, lon, d, zoom))
+osm_cands = glob.glob('dataset/osm_cache/*.png')
 
 def imshow(img, title='', scale=0.25):
 	cv2.imshow(title, cv2.resize(img, None, fx=scale, fy=scale))
@@ -122,7 +116,8 @@ class FlowchartDataset(torch.utils.data.Dataset):
 		img_ = np.ones((self.size[1], self.size[0], 3), dtype=np.float32)
 		img_[:img.shape[0], :img.shape[1]] = img
 
-		if self.osm_alpha > 0:
+		if self.osm_alpha == 'random' or self.osm_alpha > 0:
+			"""
 			lat, lon, d, zoom = random.choice(osm_cands)
 
 			if os.path.exists('dataset/osm_cache/%f_%f_%f_%d.png' % (lat, lon, d, zoom)):
@@ -130,8 +125,10 @@ class FlowchartDataset(torch.utils.data.Dataset):
 			else:
 				mapImg = osm.getImageCluster(lat, lon, lat + d, lon + d, zoom)
 				cv2.imwrite('dataset/osm_cache/%f_%f_%f_%d.png' % (lat, lon, d, zoom), mapImg)
+			"""
+			mapImg = cv2.imread(random.choice(osm_cands))
 			mapImg = cv2.resize(mapImg, (self.size[1], self.size[0])).astype(np.float32) / 255
-			mapImg *= self.osm_alpha
+			mapImg *= np.random.uniform(0.0, 1.0) if self.osm_alpha == 'random' else self.osm_alpha
 			mapImg += 1.0 - np.max(mapImg)
 			img_ = mapImg * img_
 
@@ -171,9 +168,9 @@ if __name__ == '__main__':
 
 	size=(384,384)
 
-	loader_train = torch.utils.data.DataLoader(FlowchartDataset(set='train', size=size, osm_alpha=0.5, aug=False), 
+	loader_train = torch.utils.data.DataLoader(FlowchartDataset(set='train', size=size, osm_alpha='random', aug=True), 
 		batch_size=2, shuffle=True)
-	loader_test = torch.utils.data.DataLoader(FlowchartDataset(set='test', size=size, osm_alpha=0.5), batch_size=2, shuffle=False)
+	loader_test = torch.utils.data.DataLoader(FlowchartDataset(set='test', size=size, osm_alpha='random'), batch_size=2, shuffle=False)
 
 	device = ('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -195,7 +192,7 @@ if __name__ == '__main__':
 
 	os.makedirs('result/' + args.model, exist_ok=True)
 
-	for epoch in range(10):
+	for epoch in range(20):
 		for i, (img, gt) in enumerate(loader_train):
 			img = img.to(device)
 			gt = gt.to(device)
