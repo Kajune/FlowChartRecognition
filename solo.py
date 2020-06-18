@@ -13,49 +13,46 @@ from torchvision import transforms
 from torchsummary import summary
 
 import model.focalLoss as fl
-from model.unet import UNet, UNetPP
-from model.fcn import *
+from model.unet import UNet, SOLO
 
 from utils.utils import *
+from utils import flowchart
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', type=str, default='UNet', choices=['FCN', 'DeepLab', 'UNet', 'UNetPP'])
+parser.add_argument('--model', type=str, default='solo', choices=['solo'])
 args = parser.parse_args()
 
 if __name__ == '__main__':
+#	makeImages()
+
 	size=(384,384)
 
 	loader_train = torch.utils.data.DataLoader(FlowchartDataset(set='train', size=size, osm_alpha='random', aug=False), 
 		batch_size=2, shuffle=True)
-	loader_test = torch.utils.data.DataLoader(FlowchartDataset(set='test', size=size, osm_alpha='random'), batch_size=2, shuffle=False)
+	loader_test = torch.utils.data.DataLoader(FlowchartDataset(set='test', size=size, osm_alpha='random'), 
+		batch_size=2, shuffle=False)
 
 	device = ('cuda' if torch.cuda.is_available() else 'cpu')
 
-	if args.model == 'FCN':
-		model = FCN(n_classes=len(class_names))
-	elif args.model == 'DeepLab':
-		model = DeepLabV3(n_classes=len(class_names))
-	elif args.model == 'UNet':
-		model = UNet(n_channels=3, n_classes=len(class_names))
-	elif args.model == 'UNetPP':
-		model = UNetPP(n_channels=3, n_classes=len(class_names))
+	unet = UNet(n_channels=3, n_classes=256)
+	model = SOLO(unet, len(class_names), in_channels=256, n_grid=12)
 
 	model = model.to(device)
 #	summary(model, (3, size[1], size[0]))
 
 	optimizer = optim.Adam(model.parameters())
-#	criteria = nn.BCEWithLogitsLoss()
-	criteria = fl.FocalLossBCE(gamma=2.0)
+	criteria_cat = fl.FocalLossBCE(gamma=2.0)
 
 	os.makedirs('result/' + args.model, exist_ok=True)
 
 	for epoch in range(20):
-		for i, (img, gt) in enumerate(loader_train):
+		for i, (img, gt, inst, inst_c) in enumerate(loader_train):
 			img = img.to(device)
 			gt = gt.to(device)
 
 			optimizer.zero_grad()
-			loss = criteria(model(img), gt)
+			category, mask = model(img)
+			loss = criteria_cat(category, gt)
 			loss.backward()
 			optimizer.step()
 
