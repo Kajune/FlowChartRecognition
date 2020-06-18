@@ -13,18 +13,20 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torchsummary import summary
 
-import flowchart
-import focalLoss as fl
+import model.focalLoss as fl
 from model.unet import UNet, UNetPP
 from model.fcn import *
-import osm
+
+import utils.flowchart
+import utils.osm
+from utils.makeImages import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='UNet', choices=['FCN', 'DeepLab', 'UNet', 'UNetPP'])
 args = parser.parse_args()
 
 class_names = ['process', 'decision', 'terminator', 'data', 'connection', 'arrow', 'text']
-fill_flag = [True, True, True, True, True, False, False]
+fill_flag = [True, True, True, True, True, False, True]
 color = [(0,0,255), (0,255,0), (255,255,0), (0,255,255), (255,0,255), (255,0,0), (255,255,255)]
 
 np.random.seed(114514)
@@ -52,50 +54,6 @@ def decodeMap(enc_map):
 		map[:,:,i][enc_map >= 2 ** (i + 1)] = 1
 		enc_map[enc_map >= 2 ** (i + 1)] -= 2 ** (i + 1)
 	return map
-
-def makeImages(linewidth=5):
-	dataset = flowchart.load()
-
-	imgList = []
-
-	for i, data in enumerate(dataset):
-		print('\r%d/%d' % (i, len(dataset)), end='')
-
-		img = np.ones((int(data['size'][1]), int(data['size'][0])), dtype=np.float32)
-		gt = np.zeros((int(data['size'][1]), int(data['size'][0]), len(class_names)), dtype=np.uint8)
-
-		for c, coords in enumerate(data['coords']):
-			cls_id = class_names.index(data['annot'][c][0])
-			fill = fill_flag[cls_id]
-
-			for coord in coords:
-				pts = coord.astype(np.int32)
-				pts = pts.reshape((-1,1,2))
-				cv2.polylines(img, [pts], False, 0, thickness=linewidth)
-
-				if not fill:
-					tmp = np.copy(gt[:,:,cls_id])
-					cv2.polylines(tmp, [pts], False, 1, thickness=linewidth)
-					gt[:,:,cls_id] = tmp
-	
-			if fill:
-				contours = []
-				for coord in coords:
-					for pt in coord:
-						contours.append(pt)
-				contours = np.array(contours).reshape((-1,1,2)).astype(np.int32)
-				contours = cv2.convexHull(contours)
-
-				tmp = np.copy(gt[:,:,cls_id])
-				cv2.fillConvexPoly(tmp, points=contours, color=1)
-				gt[:,:,cls_id] = tmp
-
-		cv2.imwrite('dataset/img/%05d.png' % i, img * 255)
-		cv2.imwrite('dataset/gt/%05d.png' % i, encodeMap(gt))
-		imgList.append((img, gt))
-	print()
-
-	return imgList
 
 class FlowchartDataset(torch.utils.data.Dataset):
 	def __init__(self, set, size, aug=False, osm_alpha=0.0):
@@ -164,11 +122,9 @@ def computeIoU(pred, gt, thresh=0.5):
 	return intersection.sum(axis=(0,1)) / union.sum(axis=(0,1))
 
 if __name__ == '__main__':
-#	imgList = makeImages()
-
 	size=(384,384)
 
-	loader_train = torch.utils.data.DataLoader(FlowchartDataset(set='train', size=size, osm_alpha='random', aug=True), 
+	loader_train = torch.utils.data.DataLoader(FlowchartDataset(set='train', size=size, osm_alpha='random', aug=False), 
 		batch_size=2, shuffle=True)
 	loader_test = torch.utils.data.DataLoader(FlowchartDataset(set='test', size=size, osm_alpha='random'), batch_size=2, shuffle=False)
 
