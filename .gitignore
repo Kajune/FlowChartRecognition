@@ -1,3 +1,7 @@
-*
-!.gitignore
-!*.py
+*.pyc
+*.zip
+*.png
+*.inkml
+*.txt
+*.pdf
+*.npz
